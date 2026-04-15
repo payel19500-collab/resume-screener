@@ -1,6 +1,17 @@
 import streamlit as st
 import pandas as pd
 import datetime
+import re
+
+# For PDF reading
+import PyPDF2
+
+# For DOCX reading
+import docx
+
+# For Image OCR
+import pytesseract
+from PIL import Image
 
 st.set_page_config(page_title="Resume Screener - GIC", layout="wide")
 
@@ -31,38 +42,71 @@ else:
     st.warning("Please add at least one JD from sidebar")
     selected_jd = None
 
-# ---- Simple Matching Logic ----
+# ---- Extract Text ----
+def extract_text(file):
+    text = ""
+    
+    if file.type == "application/pdf":
+        pdf_reader = PyPDF2.PdfReader(file)
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+    
+    elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        doc = docx.Document(file)
+        for para in doc.paragraphs:
+            text += para.text
+    
+    elif "image" in file.type:
+        image = Image.open(file)
+        text = pytesseract.image_to_string(image)
+    
+    return text.lower()
+
+# ---- Score ----
 def calculate_score(resume_text, jd_keywords):
     score = 0
     keywords = jd_keywords.lower().split(",")
     for word in keywords:
-        if word.strip() in resume_text.lower():
+        if word.strip() in resume_text:
             score += 1
     return int((score / len(keywords)) * 100) if keywords else 0
 
-# ---- Dummy resume text (for demo) ----
-resume_text = "sales banking insurance targets client relationship"
+# ---- Experience Check ----
+def check_experience(resume_text):
+    if "sales" not in resume_text:
+        return "No relevant sales experience."
 
+    years = re.findall(r'(\d+)\s*year', resume_text)
+    
+    if years:
+        max_year = max([int(y) for y in years])
+        if max_year < 1:
+            return "Insufficient sales experience."
+        else:
+            return "OK"
+    else:
+        return "Insufficient sales experience."
+
+# ---- Submit ----
 if st.button("Submit"):
     if uploaded_file and selected_jd:
-        jd_keywords = st.session_state.jds[selected_jd]
-        score = calculate_score(resume_text, jd_keywords)
+        
+        with st.spinner("Processing..."):
+            resume_text = extract_text(uploaded_file)
 
-        status = "Shortlisted" if score >= 75 else "Review" if score >= 50 else "Rejected"
+            score = calculate_score(resume_text, st.session_state.jds[selected_jd])
+            exp_status = check_experience(resume_text)
 
-        data = {
-            "Date": datetime.datetime.now(),
-            "File Name": uploaded_file.name,
-            "JD": selected_jd,
-            "Score": score,
-            "Status": status
-        }
-
-        df = pd.DataFrame([data])
+            if exp_status != "OK":
+                status = "Rejected"
+                reason = exp_status
+            else:
+                status = "Shortlisted" if score >= 75 else "Review" if score >= 50 else "Rejected"
+                reason = "Profile not matching job requirements." if status == "Rejected" else ""
 
         st.success("Resume Submitted!")
-        st.write(df)
 
-        # Download option
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Report", csv, "report.csv", "text/csv")
+        st.write(f"Score: {score}% | Status: {status}")
+
+        if status == "Rejected":
+            st.write(f"❌ Reason: {reason}")
